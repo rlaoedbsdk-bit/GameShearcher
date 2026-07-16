@@ -1,4 +1,5 @@
-"""모바일 게임 사전 시장조사 — 
+
+"""모바일 게임 사전 시장조사 — 무료 v3 (실무 재설계)
 설계 원칙:
 - 조사 목적별 2모드 분리: 데이터가 유효한 맥락에서만 보여준다
   · 시장/장르 조사: 진입 여부·포지셔닝 판단용
@@ -187,17 +188,45 @@ def collect_naver_anchored(keywords: tuple):
 
 @st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
 def search_game_candidates(name: str, region, lang):
-    from google_play_scraper import search as gp_search
+    """검색 후보 각각의 상세 페이지가 실제로 열리는지 사전 검증.
+    404 나는 항목(사전예약/미출시/내려간 앱)은 목록에서 제외하고,
+    정품 식별을 돕기 위해 설치 구간·평점을 함께 반환."""
+    from google_play_scraper import app as gp_app, search as gp_search
     try:
-        return [{"appId": r["appId"], "title": r["title"], "developer": r.get("developer", "")}
-                for r in gp_search(name, lang=lang, country=region, n_hits=6)]
+        raw = gp_search(name, lang=lang, country=region, n_hits=8)
     except Exception:
         return []
+
+    def validate(r):
+        for lg, ct in ((lang, region), ("en", "us")):
+            try:
+                d = gp_app(r["appId"], lang=lg, country=ct)
+                return {"appId": r["appId"], "title": d.get("title"),
+                        "developer": d.get("developer", ""),
+                        "installs": d.get("installs", "?"),
+                        "score": round(d.get("score") or 0, 2),
+                        "lang": lg, "country": ct}
+            except Exception:
+                continue
+        return None
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(validate, raw))
+    return [v for v in results if v]
 
 @st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
 def deep_dive(app_id: str, region, lang, n_reviews=80):
     from google_play_scraper import Sort, app as gp_app, reviews as gp_reviews
-    d = gp_app(app_id, lang=lang, country=region)
+    d = None
+    for lg, ct in ((lang, region), ("en", "us"), ("ko", "kr"), ("en", region)):
+        try:
+            d = gp_app(app_id, lang=lg, country=ct)
+            lang, region = lg, ct
+            break
+        except Exception:
+            continue
+    if d is None:  # 사전예약/미출시/내려간 앱 등 상세 페이지 404
+        return None, [], pd.DataFrame(), pd.DataFrame()
     info = {"앱 이름": d.get("title"), "장르": d.get("genre"),
             "평점": round(d.get("score") or 0, 2), "평가 수": d.get("ratings"),
             "설치 구간": d.get("installs"), "인앱결제": "O" if d.get("offersIAP") else "X",
@@ -362,7 +391,7 @@ if mode.startswith("🗺️"):
 - **BM 설계**: 불만 중 과금 관련 비중이 높으면 그 장르 유저의 과금 피로도가 높다는 뜻 → 초반 과금 압박 설계 주의.
 - **한계**: 리뷰 작성자는 극단(매우 만족/매우 불만) 편향. 침묵하는 다수의 의견이 아님. '관련성 높은 리뷰' 우선이라 스토어 알고리즘의 선별도 들어감.""")
 
-        st.header("5. AI 분석 리포트 받기 ")
+        st.header("5. AI 분석 리포트 받기 (무료)")
         data_summary = {"모드": "시장조사", "키워드": list(keywords), "국가": region,
                         "타겟 가설": target or "미지정",
                         "경쟁작": comp.to_dict("records") if not comp.empty else [],
@@ -392,12 +421,20 @@ else:
 
     cands = st.session_state.get("candidates", [])
     if cands:
-        pick = st.selectbox("분석할 게임 선택 (동명 앱 구분)",
+        pick = st.selectbox("분석할 게임 선택 (개발사·설치 구간으로 정품 확인)",
                             options=range(len(cands)),
-                            format_func=lambda i: f"{cands[i]['title']} — {cands[i]['developer']}")
+                            format_func=lambda i: (f"{cands[i]['title']} — {cands[i]['developer']}"
+                                                   f" · 설치 {cands[i]['installs']} · ★{cands[i]['score']}"))
         if st.button("이 게임 분석"):
             with st.spinner("상세 정보·리뷰 수집 중... (1~2분)"):
-                info, hist, recent, relevant = deep_dive(cands[pick]["appId"], region, lang)
+                info, hist, recent, relevant = deep_dive(
+                    cands[pick]["appId"], cands[pick]["country"], cands[pick]["lang"])
+            if info is None:
+                st.error("이 앱의 상세 페이지를 불러올 수 없습니다 (스토어에서 404 응답). "
+                         "사전예약 중이거나 해당 국가 미출시, 또는 최근 스토어에서 내려간 앱일 수 있습니다. "
+                         "목록에서 다른 후보를 선택하거나 국가를 바꿔 다시 검색해보세요.")
+                st.stop()
+            with st.spinner("관심층 데이터 수집 중..."):
                 naver_df = collect_naver_anchored((st.session_state.game_name,)) if region == "kr" else None
 
             st.header(f"🔬 {info['앱 이름']}")
