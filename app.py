@@ -185,16 +185,42 @@ def collect_naver_anchored(keywords: tuple):
         return pd.DataFrame({"오류": [str(e)]})
     return pd.DataFrame(rows)
 
+def _play_search_ids(name: str, region, lang):
+    """구글플레이 검색 페이지 HTML에서 앱 ID를 직접 추출.
+    라이브러리 search()는 정확 일치 시 뜨는 상단 '대표 카드'를 놓치는 맹점이 있어,
+    페이지를 직접 읽어 대표 카드를 포함한 전체 노출 앱을 잡는다."""
+    try:
+        r = rq.get("https://play.google.com/store/search",
+                   params={"q": name, "c": "apps", "hl": lang, "gl": region},
+                   headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+                   timeout=15)
+        ids = re.findall(r"/store/apps/details\?id=([\w\.]+)", r.text)
+        seen, out = set(), []
+        for i in ids:
+            if i not in seen:
+                seen.add(i); out.append(i)
+        return out[:10]
+    except Exception:
+        return []
+
 @st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
 def search_game_candidates(name: str, region, lang):
-    """검색 후보 각각의 상세 페이지가 실제로 열리는지 사전 검증.
-    404 나는 항목(사전예약/미출시/내려간 앱)은 목록에서 제외하고,
-    정품 식별을 돕기 위해 설치 구간·평점을 함께 반환."""
+    """직접 파싱(대표 카드 포함) + 라이브러리 검색을 병합한 뒤 상세 페이지를 사전 검증.
+    확정 404만 제외하고 일시 오류는 '미확인'으로 목록에 유지."""
     from google_play_scraper import app as gp_app, search as gp_search
     from google_play_scraper.exceptions import NotFoundError
+
+    merged, seen = [], set()
+    for aid in _play_search_ids(name, region, lang):  # 대표 카드가 맨 앞에 오도록 먼저
+        merged.append({"appId": aid}); seen.add(aid)
     try:
-        raw = gp_search(name, lang=lang, country=region, n_hits=10)
+        for r in gp_search(name, lang=lang, country=region, n_hits=10):
+            if r.get("appId") and r["appId"] not in seen:
+                merged.append(r); seen.add(r["appId"])
     except Exception:
+        pass
+    merged = merged[:12]
+    if not merged:
         return []
 
     def validate(r):
@@ -209,15 +235,14 @@ def search_game_candidates(name: str, region, lang):
             except NotFoundError:
                 continue  # 이 조합에선 확정 404 → 다음 조합 시도
             except Exception:
-                # 일시적 오류(속도 제한/타임아웃): 검증 불가지만 목록에는 유지
-                return {"appId": r["appId"], "title": r.get("title"),
+                return {"appId": r["appId"], "title": r.get("title") or r["appId"],
                         "developer": r.get("developer", ""),
                         "installs": "미확인", "score": round(r.get("score") or 0, 2),
                         "lang": lang, "country": region}
-        return None  # 모든 조합에서 확정 404 → 죽은 앱으로 판단, 제외
+        return None  # 모든 조합에서 확정 404 → 죽은 앱, 제외
 
     with ThreadPoolExecutor(max_workers=3) as ex:
-        results = list(ex.map(validate, raw))
+        results = list(ex.map(validate, merged))
     return [v for v in results if v]
 
 @st.cache_data(ttl=60 * 60 * 12, show_spinner=False)
@@ -498,4 +523,3 @@ else:
 [수집 데이터]
 {json.dumps(data_summary, ensure_ascii=False, indent=1)[:50000]}"""
             st.download_button("📋 분석용 텍스트 다운로드 (.txt) → claude.ai에 붙여넣기", prompt, "deepdive_prompt.txt")
-
