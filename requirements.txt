@@ -1,5 +1,4 @@
 streamlit
 google-play-scraper==1.2.7
-pytrends==4.9.2
 requests
 pandas
