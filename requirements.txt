@@ -1,5 +1,5 @@
-streamlit==1.39.0
+streamlit
 google-play-scraper==1.2.7
 pytrends==4.9.2
-requests==2.32.3
-pandas==2.2.3
+requests
+pandas
