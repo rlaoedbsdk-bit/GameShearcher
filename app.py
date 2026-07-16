@@ -1,4 +1,3 @@
-
 """모바일 게임 사전 시장조사 — 무료 v3 (실무 재설계)
 설계 원칙:
 - 조사 목적별 2모드 분리: 데이터가 유효한 맥락에서만 보여준다
@@ -192,8 +191,9 @@ def search_game_candidates(name: str, region, lang):
     404 나는 항목(사전예약/미출시/내려간 앱)은 목록에서 제외하고,
     정품 식별을 돕기 위해 설치 구간·평점을 함께 반환."""
     from google_play_scraper import app as gp_app, search as gp_search
+    from google_play_scraper.exceptions import NotFoundError
     try:
-        raw = gp_search(name, lang=lang, country=region, n_hits=8)
+        raw = gp_search(name, lang=lang, country=region, n_hits=10)
     except Exception:
         return []
 
@@ -206,11 +206,17 @@ def search_game_candidates(name: str, region, lang):
                         "installs": d.get("installs", "?"),
                         "score": round(d.get("score") or 0, 2),
                         "lang": lg, "country": ct}
+            except NotFoundError:
+                continue  # 이 조합에선 확정 404 → 다음 조합 시도
             except Exception:
-                continue
-        return None
+                # 일시적 오류(속도 제한/타임아웃): 검증 불가지만 목록에는 유지
+                return {"appId": r["appId"], "title": r.get("title"),
+                        "developer": r.get("developer", ""),
+                        "installs": "미확인", "score": round(r.get("score") or 0, 2),
+                        "lang": lang, "country": region}
+        return None  # 모든 조합에서 확정 404 → 죽은 앱으로 판단, 제외
 
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    with ThreadPoolExecutor(max_workers=3) as ex:
         results = list(ex.map(validate, raw))
     return [v for v in results if v]
 
@@ -492,3 +498,4 @@ else:
 [수집 데이터]
 {json.dumps(data_summary, ensure_ascii=False, indent=1)[:50000]}"""
             st.download_button("📋 분석용 텍스트 다운로드 (.txt) → claude.ai에 붙여넣기", prompt, "deepdive_prompt.txt")
+
